@@ -1,0 +1,40 @@
+# https://docs.github.com/en/repositories/managing-your-repositories-settings-and-customization/customizing-your-repository/about-code-owners
+#
+# CODEOWNERS for simple-container-com/sc-plugin-cloudru — mirrors the
+# simple-container-com/api policy. See that repo's CODEOWNERS for the
+# multi-reviewer / branch-protection semantics (listing multiple owners on
+# one pattern is an ALTERNATIVES set, not a conjunction).
+
+# ---------------------------------------------------------------------
+# Default — every file pulls in at least one lead for review.
+# ---------------------------------------------------------------------
+*                                       @Cre-eD @smecsia @universe-ops @Laboratory
+
+# ---------------------------------------------------------------------
+# CI / supply-chain — sensitive paths. Touching these changes how every
+# plugin release is built, signed, and distributed.
+# ---------------------------------------------------------------------
+/.github/                               @Cre-eD @smecsia @universe-ops @Laboratory
+/.github/workflows/                     @Cre-eD @smecsia @universe-ops @Laboratory
+/.github/actions/                       @Cre-eD @smecsia @universe-ops @Laboratory
+
+# ---------------------------------------------------------------------
+# The rendered shell. plugin/internal/scripts.go decides what a DNS
+# record's local.Command actually executes, and that string is persisted
+# in the operator's Pulumi state and re-executed at destroy time. A
+# change here is a change to what runs on every runner, retroactively.
+# ---------------------------------------------------------------------
+/plugin/internal/scripts.go             @Cre-eD @smecsia @universe-ops @Laboratory
+
+# ---------------------------------------------------------------------
+# Module graphs — dep bumps need security review.
+# ---------------------------------------------------------------------
+/api/go.mod                             @Cre-eD @smecsia @universe-ops @Laboratory
+/api/go.sum                             @Cre-eD @smecsia @universe-ops @Laboratory
+/plugin/go.mod                          @Cre-eD @smecsia @universe-ops @Laboratory
+/plugin/go.sum                          @Cre-eD @smecsia @universe-ops @Laboratory
+
+# ---------------------------------------------------------------------
+# This policy + ownership file itself.
+# ---------------------------------------------------------------------
+/CODEOWNERS                             @Cre-eD @smecsia @universe-ops @Laboratory

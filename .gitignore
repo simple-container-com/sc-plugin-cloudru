@@ -1,0 +1,19 @@
+# Compiled binaries
+/sc-plugin-cloudru
+/plugin/sc-plugin-cloudru
+/dist/
+/bin/
+
+# Go
+/plugin/vendor/
+/api/vendor/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

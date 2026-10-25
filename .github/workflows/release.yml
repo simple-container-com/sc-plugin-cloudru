@@ -1,0 +1,186 @@
+name: Release
+
+# Cuts cross-platform binaries + sha256sums for every release. Two triggers:
+#
+#   - push to main → auto-release with CalVer "vYYYY.MM.DD-<short-sha>".
+#     Mirrors simple-container-com/api's own release cadence (every merge
+#     to main cuts a new sc release).
+#   - manually-pushed "v*" tag → named release for pinning / rollback.
+#
+# Both paths produce the same artifact set: three binaries (linux/amd64,
+# linux/arm64, darwin/arm64), a sha256sums.txt, and a GitHub Release.
+# darwin/amd64 and windows are intentionally unsupported — the operator
+# surface is Linux CI runners + Apple-Silicon dev laptops.
+#
+# Same shape as sc-plugin-cloudflare and sc-plugin-yandex, with one thing
+# that is specific to THIS plugin and worth knowing before you change it:
+# the released binary is BOTH the plugin subprocess and the `cloudru` CLI
+# the rendered local.Command scripts invoke by absolute path (see
+# plugin/internal/scripts.go). An operator's Pulumi state records that path,
+# which is the plugin cache dir for the pinned version — so a release that
+# builds a working plugin but a broken CLI mode fails at destroy time, on a
+# stack that was deployed from an earlier, healthy release.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    name: Compute version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      is_tag:  ${{ steps.compute.outputs.is_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: compute
+        name: Resolve version string
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "is_tag=true"               >> "$GITHUB_OUTPUT"
+          else
+            # CalVer with short SHA — same shape SC core uses.
+            ver="v$(date -u +%Y.%m.%d)-$(git rev-parse --short=7 HEAD)"
+            echo "version=${ver}"            >> "$GITHUB_OUTPUT"
+            echo "is_tag=false"              >> "$GITHUB_OUTPUT"
+          fi
+          echo "Resolved version: $(cat $GITHUB_OUTPUT | grep ^version=)"
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: plugin/go.sum
+
+      # `go build` does not compile test packages, so a build-only gate lets a
+      # broken fake through. Both modules, both with -count=1.
+      - name: Test /api
+        working-directory: api
+        run: go test ./... -count=1
+
+      - name: Test /plugin
+        working-directory: plugin
+        run: go test ./... -count=1
+
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    needs: [version, test]
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: plugin/go.sum
+
+      - name: Build
+        working-directory: plugin
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+          VERSION: ${{ needs.version.outputs.version }}
+          # Kept from sc-plugin-yandex, where the ~2 GB generated pulumi-yandex
+          # SDK OOMs a 7 GB runner at default parallelism. This plugin is far
+          # lighter — pulumi-command is its only provider SDK and the linked
+          # binary is ~43 MB against yandex's ~258 MB — so the pin is
+          # insurance, not a known requirement. It costs build minutes, not
+          # correctness; drop it only after watching a release actually run.
+          GOMAXPROCS: '1'
+          GOMEMLIMIT: '6GiB'
+        run: |
+          out=sc-plugin-cloudru-${GOOS}-${GOARCH}
+          go build -trimpath -buildvcs=false -p 1 \
+            -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "../${out}" \
+            ./cmd/sc-plugin-cloudru
+          sha256sum "../${out}" > "../${out}.sha256"
+
+      # Smoke the CLI half of the binary. Only meaningful on the native
+      # arch, and it is deliberately not a full `--help` diff: it asserts
+      # that the cobra tree resolves to the leaf commands the state-persisted
+      # scripts invoke, which is the failure a plugin-only test cannot see
+      # (and which only surfaces at an operator's destroy).
+      #
+      # Grep the Usage line, not a Short — cobra prints Long when a command
+      # has one, and both of these do, so a Short is absent from the output.
+      - name: Verify CLI mode is reachable
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: |
+          for verb in apply destroy; do
+            ./sc-plugin-cloudru-linux-amd64 cloudru dns-record "$verb" --help \
+              | grep -q "cloudru dns-record $verb \[flags\]" \
+              || { echo "CLI mode broken: dns-record $verb unreachable"; exit 1; }
+          done
+          echo "CLI mode OK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            sc-plugin-cloudru-${{ matrix.goos }}-${{ matrix.goarch }}*
+
+  release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: [version, build]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Build consolidated sha256sums.txt
+        working-directory: dist
+        run: |
+          cat sc-plugin-cloudru-*.sha256 > sha256sums.txt
+          rm sc-plugin-cloudru-*.sha256
+          cat sha256sums.txt
+
+      - name: Tag commit if from main
+        if: needs.version.outputs.is_tag == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # Push a lightweight tag so the Release is anchored. The tag already
+          # has the right commit — this run was triggered by that commit.
+          git tag "${VERSION}"
+          git push origin "${VERSION}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "${VERSION}" \
+            --title "${VERSION}" \
+            --generate-notes \
+            dist/*
