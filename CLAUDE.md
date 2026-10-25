@@ -77,6 +77,23 @@ cd plugin && GOFLAGS=-mod=mod go build -o /tmp/sc-plugin-cloudru-dbg ./cmd/sc-pl
 #       path: /tmp/sc-plugin-cloudru-dbg
 ```
 
+**Check which `sc` you are about to run, and prove the plugin actually served the deploy.**
+An `sc` built before the plugin system **ignores a `plugins:` block silently** and provisions
+through its own **in-tree** `cloudru` driver — which still exists in core during the extraction
+window — reporting a green `+ 2 created` with a real, publicly-resolvable record. Live-caught
+2026-10-25, on a box where `$PATH`'s `sc` was a monolith dev build.
+
+```sh
+ls -la "$(which sc)"
+strings -a "$(readlink -f "$(which sc)")" | grep -c hashicorp/go-plugin   # 0 ⇒ no plugin support
+```
+
+The two tells after a run: the log line `pre-engine loaded plugin "cloudru" vcloudru-0.0.1`
+must be present, and the `create` script in Pulumi state must be this binary's **absolute
+path**, not `export PATH=…; sc cloudru dns-record apply`. `find ~/.sc/plugins` is the fast
+check for whether a `source: {type: github-release}` block was ever resolved. Prefer invoking
+a plugin-enabled core by absolute path over trusting `$PATH`.
+
 Tests:
 ```sh
 cd plugin && GOFLAGS=-mod=mod go test ./... -count=1
