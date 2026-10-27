@@ -6,7 +6,7 @@ require (
 	github.com/onsi/gomega v1.41.0
 	github.com/pkg/errors v0.9.1
 	github.com/samber/lo v1.53.0
-	github.com/simple-container-com/api v0.0.0-20261025132958-787fb0fe2efd
+	github.com/simple-container-com/api v0.0.0-20261027182937-685d153ee7de
 )
 
 require (

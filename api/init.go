@@ -65,4 +65,36 @@ func init() {
 	api.RegisterCloudSingleImageConverter(api.CloudSingleImageConfigRegister{
 		TemplateTypeCloudruContainerApp: ToContainerAppConfig,
 	})
+
+	// Fool-protect operators who upgrade SC past the Cloud.ru in-tree drop
+	// without touching their server.yaml. SC's parse-time validator auto-injects
+	// a `plugins.cloudru:` block with the latest release from GitHub when it
+	// finds an un-declared owned type; this registration is how it knows the
+	// mapping. See api/pkg/api/plugin_requirements.go + the fool-protection
+	// addendum in docs/design/2026-10-24/sc-plugin-architecture/
+	// 04-no-destroy-invariant.md Addendum J.
+	//
+	// Walker gap, worth stating: the walker in SC core reads res.Type for each
+	// per-env resource, which for a VM resource is "vm" and not the driver
+	// string ("cloudru-evolution-vm"). So the VM-driver tokens below are
+	// documentation-only until a follow-up extends the walker with
+	// VmConfigAware. Every real operator who uses cloudru-evolution-vm also
+	// uses cloudru-dns or cloudru-container-app, which the walker already
+	// finds, so this is not a hole in practice today.
+	api.RegisterPluginRequirement(api.PluginRequirement{
+		PluginName: "cloudru",
+		OwnedTypes: []string{
+			ProviderType,
+			RegistrarTypeCloudruDns,
+			TemplateTypeCloudruContainerApp,
+			AuthTypeCloudruAccessKey,
+			AuthTypeCloudruEvolutionKey,
+			"cloudru-evolution-vm",
+			"cloudru-vm",
+		},
+		DefaultSource: api.PluginSource{
+			Type:       "github-release",
+			Repository: "simple-container-com/sc-plugin-cloudru",
+		},
+	})
 }

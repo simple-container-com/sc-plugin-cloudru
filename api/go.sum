@@ -214,8 +214,8 @@ github.com/santhosh-tekuri/jsonschema/v5 v5.3.1 h1:lZUw3E0/J3roVtGQ+SCrUrg3ON6Ng
 github.com/santhosh-tekuri/jsonschema/v5 v5.3.1/go.mod h1:uToXkOrWAZ6/Oc07xWQrPOhJotwFIyu2bBVN41fcDUY=
 github.com/sergi/go-diff v1.4.0 h1:n/SP9D5ad1fORl+llWyN+D6qoUETXNZARKjyY2/KVCw=
 github.com/sergi/go-diff v1.4.0/go.mod h1:A0bzQcvG0E7Rwjx0REVgAGH58e96+X0MeOfepqsbeW4=
-github.com/simple-container-com/api v0.0.0-20261025132958-787fb0fe2efd h1:zkDh3Gpo8Mr8dmOLHigQQGQsdVc/xd04DDFXUuFjqUo=
-github.com/simple-container-com/api v0.0.0-20261025132958-787fb0fe2efd/go.mod h1:GwhRm1oz6coz5HBJg2iozOcKBlOyXTnXBbqKeGX2kAc=
+github.com/simple-container-com/api v0.0.0-20261027182937-685d153ee7de h1:qthuGiCFKQPn/hYOzQNXS36jMhD5fP+0OvZBQV9q0yc=
+github.com/simple-container-com/api v0.0.0-20261027182937-685d153ee7de/go.mod h1:svr5sdo7EJf7nEuU+mFXO5IZsDJGHDSQADaBdKaZSm0=
 github.com/sirupsen/logrus v1.7.0/go.mod h1:yWOB1SBYBC5VeMP7gHvWumXLIWorT60ONWic61uBYv0=
 github.com/sirupsen/logrus v1.9.4 h1:TsZE7l11zFCLZnZ+teH4Umoq5BhEIfIzfRDZ1Uzql2w=
 github.com/sirupsen/logrus v1.9.4/go.mod h1:ftWc9WdOfJ0a92nsE2jF5u5ZwH8Bv2zdeOC42RjbV2g=

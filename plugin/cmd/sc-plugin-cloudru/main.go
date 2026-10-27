@@ -5,14 +5,15 @@
 // extracted from pkg/clouds/{cloudru,pulumi/cloudru} and pkg/cmd/cmd_cloudru per
 // the Phase 3 extraction in forge/docs/design/2026-10-24/sc-plugin-architecture/.
 //
-// V1 scope — the registrar slice:
+// Shipped scope:
 //   - cloudru-dns registrar   (ProvisionRegistrar + NewDnsRecord +
 //     NewOverrideHeaderRule + ProvisionDomainForEndpoint)
+//   - cloudru-evolution-vm    (VmHosts RPC — Phase 3d-ii, VmHosts seam from
+//     api PR #488)
 //
-// The Container App template (`cloudru-container-app`) and the Evolution VM driver
-// are later slices; the config tier for both is already in ./api, so a server.yaml
-// naming them still parses — it is the provisioning half that is not advertised
-// here yet.
+// The Container App template (`cloudru-container-app`) is a later slice; the
+// config tier is already in ./api so a server.yaml naming it still parses —
+// the provisioning half is not advertised here yet.
 //
 // # This binary has two modes, which the other plugins do not
 //
@@ -47,9 +48,11 @@ import (
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/pkg/errors"
 	sdk "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+
 	"github.com/simple-container-com/api/pkg/api"
 	"github.com/simple-container-com/api/pkg/api/logger"
 	pApi "github.com/simple-container-com/api/pkg/clouds/pulumi/api"
+	"github.com/simple-container-com/api/pkg/clouds/vm"
 	scPlugin "github.com/simple-container-com/api/pkg/plugin"
 	scpluginv1 "github.com/simple-container-com/api/pkg/plugin/proto/v1"
 
@@ -91,16 +94,31 @@ func (p *cruPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 		//     state of a live stack reads as a provider replacement, which on a
 		//     local.Command means every record and app is replaced with it.
 		//
-		// No ResourceTypes and no ComputeProcessorTypes yet: the Container App and
-		// the Evolution VM are later slices. An empty list is the honest answer —
-		// advertising a type this binary cannot provision would have SC core route
-		// the resource here and fail at dispatch instead of at config parse.
+		// No ResourceTypes and no ComputeProcessorTypes yet: the Container App is
+		// a later slice. An empty list is the honest answer — advertising a type
+		// this binary cannot provision would have SC core route the resource here
+		// and fail at dispatch instead of at config parse. The Evolution VM
+		// provisions via VmDrivers below, not ResourceTypes — SC core routes
+		// `type: vm` resources with `provider: cloudru-evolution-vm` to the
+		// VmHosts RPC rather than to Provision.
 		PulumiPlugins: []*scpluginv1.PulumiPluginRequirement{
 			// pulumi-command — every Cloud.ru resource is a local.Command, so this
 			// is the only provider plugin the stack needs. Matches the version in
 			// api/go.mod (pulumi/pulumi-command/sdk v1.2.1); its own replacement
 			// semantics are what the Triggers note in internal/registrar.go is about.
 			{Package: "command", Version: "1.2.1"},
+			// pulumi-tls — the Evolution VM driver mints the deploy key as a
+			// tls.PrivateKey (ED25519). Matches api/go.mod. The remote.Command for
+			// the docker bootstrap is `command`.
+			{Package: "tls", Version: "5.3.0"},
+		},
+		VmDrivers: []*scpluginv1.VmDriverSpec{
+			// Advertise the cloudru-evolution-vm driver so core routes a
+			// `type: vm` / `provider: cloudru-evolution-vm` resource to this
+			// plugin's VmHosts RPC. ToProto echoes the capability row verbatim
+			// from the lifted api package — SC core and the plugin always agree
+			// on what the driver can do, because they read the same source.
+			vm.Drivers[vm.DriverCloudruEvolution].ToProto(vm.DriverCloudruEvolution),
 		},
 	}, nil
 }
@@ -254,6 +272,32 @@ func (p *cruPlugin) ProvisionDomainForEndpoint(ctx context.Context, req *scplugi
 		return nil, err
 	}
 	return &scpluginv1.ProvisionDomainForEndpointResponse{Urn: waitForRef(out.Ref)}, nil
+}
+
+// VmHosts converges a Cloud.ru Evolution VM into HostFacts the core-side
+// stack code (compose/k3s/readiness) connects to over SSH.
+//
+// Opens its own pctx against the request's monitor address and defers close()
+// — Pulumi fires RegisterResource from a goroutine and a handler that returned
+// before its outputs resolved would let pctx.Close() tear the engine
+// connection down mid-registration. The in-plugin awaits inside
+// cruInternal.VmHosts (BuildVmHosts' chain of URN waits) satisfy that
+// constraint before close() runs. Addendum H of 04-no-destroy-invariant.md.
+func (p *cruPlugin) VmHosts(ctx context.Context, req *scpluginv1.VmHostsRequest) (*scpluginv1.VmHostsResponse, error) {
+	p.progress.Info("vm-hosts", fmt.Sprintf("provisioning cloudru-evolution-vm %q (driver=%s)", req.GetResourceName(), req.GetDriver()))
+	pctx, done, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+
+	resp, err := cruInternal.VmHosts(pctx, req)
+	if err != nil {
+		p.progress.Error("vm-hosts", fmt.Sprintf("vm %q failed: %v", req.GetResourceName(), err))
+		return nil, err
+	}
+	p.progress.Info("vm-hosts", fmt.Sprintf("vm %q ready, %d host(s)", req.GetResourceName(), len(resp.GetHosts())))
+	return resp, nil
 }
 
 func (p *cruPlugin) LogStream(_ *scpluginv1.LogStreamRequest, stream scpluginv1.SCCloudPlugin_LogStreamServer) error {
