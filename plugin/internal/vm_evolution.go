@@ -15,14 +15,14 @@ import (
 	"github.com/pulumi/pulumi-command/sdk/go/command/remote"
 	"github.com/pulumi/pulumi-tls/sdk/v5/go/tls"
 	sdk "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
-
 	"github.com/simple-container-com/api/pkg/api"
-	"github.com/simple-container-com/api/pkg/clouds/cloudru"
-	"github.com/simple-container-com/api/pkg/clouds/cloudru/evolution"
 	cloudsvm "github.com/simple-container-com/api/pkg/clouds/pulumi/vm"
 	"github.com/simple-container-com/api/pkg/clouds/vm"
 	scPlugin "github.com/simple-container-com/api/pkg/plugin"
 	scpluginv1 "github.com/simple-container-com/api/pkg/plugin/proto/v1"
+
+	cloudru "github.com/simple-container-com/sc-plugin-cloudru/api"
+	"github.com/simple-container-com/sc-plugin-cloudru/api/evolution"
 )
 
 // VmHosts converges one Cloud.ru Evolution VM for a `type: vm` resource whose

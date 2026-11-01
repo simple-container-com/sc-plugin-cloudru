@@ -10,10 +10,10 @@ import (
 
 	"github.com/pkg/errors"
 	sdk "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
-
-	"github.com/simple-container-com/api/pkg/clouds/cloudru/evolution"
 	"github.com/simple-container-com/api/pkg/clouds/vm"
 	scPlugin "github.com/simple-container-com/api/pkg/plugin"
+
+	"github.com/simple-container-com/sc-plugin-cloudru/api/evolution"
 )
 
 // cloudruEvolutionVmSpec turns the cloud-independent VmConfig into the request
