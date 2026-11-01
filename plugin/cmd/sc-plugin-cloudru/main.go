@@ -48,7 +48,6 @@ import (
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/pkg/errors"
 	sdk "github.com/pulumi/pulumi/sdk/v3/go/pulumi"
-
 	"github.com/simple-container-com/api/pkg/api"
 	"github.com/simple-container-com/api/pkg/api/logger"
 	pApi "github.com/simple-container-com/api/pkg/clouds/pulumi/api"
@@ -131,6 +130,14 @@ func (p *cruPlugin) pulumiContextFromHeader(ctx context.Context, h *scpluginv1.R
 		MonitorAddr: h.GetMonitorAddress(),
 		Project:     h.GetProjectName(),
 		Stack:       h.GetStackName(),
+		// DryRun uptake deferred — this plugin's api pin predates api
+		// v2026.10.60 (RequestHeader.dry_run), and bumping it hits a
+		// pre-existing refactor gap: pkg/clouds/cloudru + pkg/clouds/cloudru/evolution
+		// were removed from api without migrating sc-plugin-cloudru's own
+		// internal imports. Follow-up: lift those packages into
+		// sc-plugin-cloudru/api, then bump the api pin, then `DryRun:
+		// h.GetDryRun(),` here. Matches the shape in
+		// sc-plugin-{mongodb,aws,cloudflare}.
 	})
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "open pulumi context from monitor address")
@@ -140,11 +147,17 @@ func (p *cruPlugin) pulumiContextFromHeader(ctx context.Context, h *scpluginv1.R
 
 func (p *cruPlugin) ProvisionRegistrar(ctx context.Context, req *scpluginv1.ProvisionRegistrarRequest) (*scpluginv1.ProvisionRegistrarResponse, error) {
 	p.progress.Info("provision-registrar", fmt.Sprintf("initialising cloud.ru DNS registrar for zone %q", strVal(req.GetConfig()["zoneName"])))
-	pctx, done, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
+	pctx, _, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
 	if err != nil {
 		return nil, err
 	}
-	defer done()
+	// DO NOT close pctx — closing it cuts off in-flight RegisterResource
+	// RPCs that Pulumi's background goroutines were about to make, which
+	// drops the plugin's URN registrations and plans a destroy of every
+	// pre-existing state entry. This is the exact cascade pattern that
+	// destroyed the fleet's shared Atlas project on 2026-10-31T11:07.
+	// See Addendum U/V of
+	// forge/docs/design/2026-10-24/sc-plugin-architecture/04-no-destroy-invariant.md.
 
 	cfg := inputsToRegistrarConfig(req.GetConfig())
 	desc := api.RegistrarDescriptor{
@@ -180,11 +193,17 @@ func (p *cruPlugin) ProvisionRegistrar(ctx context.Context, req *scpluginv1.Prov
 }
 
 func (p *cruPlugin) NewDnsRecord(ctx context.Context, req *scpluginv1.NewDnsRecordRequest) (*scpluginv1.NewDnsRecordResponse, error) {
-	pctx, done, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
+	pctx, _, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
 	if err != nil {
 		return nil, err
 	}
-	defer done()
+	// DO NOT close pctx — closing it cuts off in-flight RegisterResource
+	// RPCs that Pulumi's background goroutines were about to make, which
+	// drops the plugin's URN registrations and plans a destroy of every
+	// pre-existing state entry. This is the exact cascade pattern that
+	// destroyed the fleet's shared Atlas project on 2026-10-31T11:07.
+	// See Addendum U/V of
+	// forge/docs/design/2026-10-24/sc-plugin-architecture/04-no-destroy-invariant.md.
 	p.mu.Lock()
 	r := p.registrar
 	p.mu.Unlock()
@@ -217,11 +236,17 @@ func (p *cruPlugin) NewDnsRecord(ctx context.Context, req *scpluginv1.NewDnsReco
 // RPC answers `Unimplemented`, which reads like a plugin-version mismatch instead
 // of like the explanation the driver has written out.
 func (p *cruPlugin) NewOverrideHeaderRule(ctx context.Context, req *scpluginv1.NewOverrideHeaderRuleRequest) (*scpluginv1.NewOverrideHeaderRuleResponse, error) {
-	pctx, done, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
+	pctx, _, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
 	if err != nil {
 		return nil, err
 	}
-	defer done()
+	// DO NOT close pctx — closing it cuts off in-flight RegisterResource
+	// RPCs that Pulumi's background goroutines were about to make, which
+	// drops the plugin's URN registrations and plans a destroy of every
+	// pre-existing state entry. This is the exact cascade pattern that
+	// destroyed the fleet's shared Atlas project on 2026-10-31T11:07.
+	// See Addendum U/V of
+	// forge/docs/design/2026-10-24/sc-plugin-architecture/04-no-destroy-invariant.md.
 	p.mu.Lock()
 	r := p.registrar
 	p.mu.Unlock()
@@ -249,11 +274,17 @@ func (p *cruPlugin) NewOverrideHeaderRule(ctx context.Context, req *scpluginv1.N
 }
 
 func (p *cruPlugin) ProvisionDomainForEndpoint(ctx context.Context, req *scpluginv1.ProvisionDomainForEndpointRequest) (*scpluginv1.ProvisionDomainForEndpointResponse, error) {
-	pctx, done, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
+	pctx, _, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
 	if err != nil {
 		return nil, err
 	}
-	defer done()
+	// DO NOT close pctx — closing it cuts off in-flight RegisterResource
+	// RPCs that Pulumi's background goroutines were about to make, which
+	// drops the plugin's URN registrations and plans a destroy of every
+	// pre-existing state entry. This is the exact cascade pattern that
+	// destroyed the fleet's shared Atlas project on 2026-10-31T11:07.
+	// See Addendum U/V of
+	// forge/docs/design/2026-10-24/sc-plugin-architecture/04-no-destroy-invariant.md.
 	p.mu.Lock()
 	r := p.registrar
 	p.mu.Unlock()
@@ -285,11 +316,17 @@ func (p *cruPlugin) ProvisionDomainForEndpoint(ctx context.Context, req *scplugi
 // constraint before close() runs. Addendum H of 04-no-destroy-invariant.md.
 func (p *cruPlugin) VmHosts(ctx context.Context, req *scpluginv1.VmHostsRequest) (*scpluginv1.VmHostsResponse, error) {
 	p.progress.Info("vm-hosts", fmt.Sprintf("provisioning cloudru-evolution-vm %q (driver=%s)", req.GetResourceName(), req.GetDriver()))
-	pctx, done, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
+	pctx, _, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
 	if err != nil {
 		return nil, err
 	}
-	defer done()
+	// DO NOT close pctx — closing it cuts off in-flight RegisterResource
+	// RPCs that Pulumi's background goroutines were about to make, which
+	// drops the plugin's URN registrations and plans a destroy of every
+	// pre-existing state entry. This is the exact cascade pattern that
+	// destroyed the fleet's shared Atlas project on 2026-10-31T11:07.
+	// See Addendum U/V of
+	// forge/docs/design/2026-10-24/sc-plugin-architecture/04-no-destroy-invariant.md.
 
 	resp, err := cruInternal.VmHosts(pctx, req)
 	if err != nil {
