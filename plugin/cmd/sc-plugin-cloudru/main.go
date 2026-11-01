@@ -32,9 +32,12 @@
 //     dns-record apply` was. This is what the rendered command text invokes, by
 //     absolute path — see internal/scripts.go for why, and for what that costs.
 //
-// Everything else is the same bus every other plugin speaks: each RPC opens a
-// short-lived pulumi.Context against the host's monitor address and reuses the
-// lifted driver code unchanged.
+// Every RPC opens a short-lived pulumi.Context through the shared
+// api/pkg/plugin/runtime package and defers runtime.Settle to drain
+// RegisterResource goroutines before the response is sent. That is what keeps a
+// plugin that returns from a handler from dropping its own URN registrations
+// (Addendum U/V of forge/docs/design/2026-10-24/sc-plugin-architecture/
+// 04-no-destroy-invariant.md).
 package main
 
 import (
@@ -42,8 +45,6 @@ import (
 	"fmt"
 	"os"
 	"sync"
-
-	"gopkg.in/yaml.v3"
 
 	hclog "github.com/hashicorp/go-hclog"
 	"github.com/pkg/errors"
@@ -54,6 +55,7 @@ import (
 	"github.com/simple-container-com/api/pkg/clouds/vm"
 	scPlugin "github.com/simple-container-com/api/pkg/plugin"
 	scpluginv1 "github.com/simple-container-com/api/pkg/plugin/proto/v1"
+	"github.com/simple-container-com/api/pkg/plugin/runtime"
 
 	cruApi "github.com/simple-container-com/sc-plugin-cloudru/api"
 	cruInternal "github.com/simple-container-com/sc-plugin-cloudru/plugin/internal"
@@ -122,42 +124,13 @@ func (p *cruPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scp
 	}, nil
 }
 
-func (p *cruPlugin) pulumiContextFromHeader(ctx context.Context, h *scpluginv1.RequestHeader) (*sdk.Context, func(), error) {
-	if h.GetMonitorAddress() == "" {
-		return nil, nil, errors.New("no monitor address in request header")
-	}
-	pctx, err := sdk.NewContext(ctx, sdk.RunInfo{
-		MonitorAddr: h.GetMonitorAddress(),
-		Project:     h.GetProjectName(),
-		Stack:       h.GetStackName(),
-		// DryRun uptake deferred — this plugin's api pin predates api
-		// v2026.10.60 (RequestHeader.dry_run), and bumping it hits a
-		// pre-existing refactor gap: pkg/clouds/cloudru + pkg/clouds/cloudru/evolution
-		// were removed from api without migrating sc-plugin-cloudru's own
-		// internal imports. Follow-up: lift those packages into
-		// sc-plugin-cloudru/api, then bump the api pin, then `DryRun:
-		// h.GetDryRun(),` here. Matches the shape in
-		// sc-plugin-{mongodb,aws,cloudflare}.
-	})
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "open pulumi context from monitor address")
-	}
-	return pctx, func() { pctx.Close() }, nil
-}
-
-func (p *cruPlugin) ProvisionRegistrar(ctx context.Context, req *scpluginv1.ProvisionRegistrarRequest) (*scpluginv1.ProvisionRegistrarResponse, error) {
+func (p *cruPlugin) ProvisionRegistrar(ctx context.Context, req *scpluginv1.ProvisionRegistrarRequest) (resp *scpluginv1.ProvisionRegistrarResponse, err error) {
 	p.progress.Info("provision-registrar", fmt.Sprintf("initialising cloud.ru DNS registrar for zone %q", strVal(req.GetConfig()["zoneName"])))
-	pctx, _, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
+	rctx, err := runtime.NewContext(ctx, req.GetHeader(), runtime.WithLocalEngineFallback(p.progress))
 	if err != nil {
 		return nil, err
 	}
-	// DO NOT close pctx — closing it cuts off in-flight RegisterResource
-	// RPCs that Pulumi's background goroutines were about to make, which
-	// drops the plugin's URN registrations and plans a destroy of every
-	// pre-existing state entry. This is the exact cascade pattern that
-	// destroyed the fleet's shared Atlas project on 2026-10-31T11:07.
-	// See Addendum U/V of
-	// forge/docs/design/2026-10-24/sc-plugin-architecture/04-no-destroy-invariant.md.
+	defer runtime.Settle(rctx, &resp, &err)
 
 	cfg := inputsToRegistrarConfig(req.GetConfig())
 	desc := api.RegistrarDescriptor{
@@ -179,7 +152,7 @@ func (p *cruPlugin) ProvisionRegistrar(ctx context.Context, req *scpluginv1.Prov
 	// the stack still at `create`. Live-caught 2026-10-25 on the first smoke of
 	// this plugin; the preceding build did pass a provider and deadlocked exactly
 	// there.
-	r, err := cruInternal.Registrar(pctx, desc, pApi.ProvisionParams{Log: logger.New()})
+	r, err := cruInternal.Registrar(rctx.Pulumi, desc, pApi.ProvisionParams{Log: logger.New()})
 	if err != nil {
 		p.progress.Error("provision-registrar", "init failed: "+err.Error())
 		return nil, errors.Wrap(err, "init cloud.ru DNS registrar")
@@ -192,18 +165,13 @@ func (p *cruPlugin) ProvisionRegistrar(ctx context.Context, req *scpluginv1.Prov
 	return &scpluginv1.ProvisionRegistrarResponse{MainDomain: r.MainDomain()}, nil
 }
 
-func (p *cruPlugin) NewDnsRecord(ctx context.Context, req *scpluginv1.NewDnsRecordRequest) (*scpluginv1.NewDnsRecordResponse, error) {
-	pctx, _, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
+func (p *cruPlugin) NewDnsRecord(ctx context.Context, req *scpluginv1.NewDnsRecordRequest) (resp *scpluginv1.NewDnsRecordResponse, err error) {
+	rctx, err := runtime.NewContext(ctx, req.GetHeader(), runtime.WithLocalEngineFallback(p.progress))
 	if err != nil {
 		return nil, err
 	}
-	// DO NOT close pctx — closing it cuts off in-flight RegisterResource
-	// RPCs that Pulumi's background goroutines were about to make, which
-	// drops the plugin's URN registrations and plans a destroy of every
-	// pre-existing state entry. This is the exact cascade pattern that
-	// destroyed the fleet's shared Atlas project on 2026-10-31T11:07.
-	// See Addendum U/V of
-	// forge/docs/design/2026-10-24/sc-plugin-architecture/04-no-destroy-invariant.md.
+	defer runtime.Settle(rctx, &resp, &err)
+
 	p.mu.Lock()
 	r := p.registrar
 	p.mu.Unlock()
@@ -211,7 +179,7 @@ func (p *cruPlugin) NewDnsRecord(ctx context.Context, req *scpluginv1.NewDnsReco
 		return nil, errors.New("NewDnsRecord called before ProvisionRegistrar")
 	}
 	p.progress.Info("dns-record", fmt.Sprintf("creating %s record %q → %q", req.GetRecordType(), req.GetRecordName(), req.GetValueResolved()))
-	out, err := r.NewRecord(pctx, api.DnsRecord{
+	out, err := r.NewRecord(rctx.Pulumi, api.DnsRecord{
 		Name:  req.GetRecordName(),
 		Type:  req.GetRecordType(),
 		Value: req.GetValueResolved(),
@@ -235,18 +203,13 @@ func (p *cruPlugin) NewDnsRecord(ctx context.Context, req *scpluginv1.NewDnsReco
 // anyway, because a refusal is only reachable if the RPC exists: an unimplemented
 // RPC answers `Unimplemented`, which reads like a plugin-version mismatch instead
 // of like the explanation the driver has written out.
-func (p *cruPlugin) NewOverrideHeaderRule(ctx context.Context, req *scpluginv1.NewOverrideHeaderRuleRequest) (*scpluginv1.NewOverrideHeaderRuleResponse, error) {
-	pctx, _, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
+func (p *cruPlugin) NewOverrideHeaderRule(ctx context.Context, req *scpluginv1.NewOverrideHeaderRuleRequest) (resp *scpluginv1.NewOverrideHeaderRuleResponse, err error) {
+	rctx, err := runtime.NewContext(ctx, req.GetHeader(), runtime.WithLocalEngineFallback(p.progress))
 	if err != nil {
 		return nil, err
 	}
-	// DO NOT close pctx — closing it cuts off in-flight RegisterResource
-	// RPCs that Pulumi's background goroutines were about to make, which
-	// drops the plugin's URN registrations and plans a destroy of every
-	// pre-existing state entry. This is the exact cascade pattern that
-	// destroyed the fleet's shared Atlas project on 2026-10-31T11:07.
-	// See Addendum U/V of
-	// forge/docs/design/2026-10-24/sc-plugin-architecture/04-no-destroy-invariant.md.
+	defer runtime.Settle(rctx, &resp, &err)
+
 	p.mu.Lock()
 	r := p.registrar
 	p.mu.Unlock()
@@ -265,7 +228,7 @@ func (p *cruPlugin) NewOverrideHeaderRule(ctx context.Context, req *scpluginv1.N
 	if op := req.GetOverridePages(); op != nil {
 		rule.OverridePages = &pApi.OverridePagesRule{IndexPage: op.GetIndexPage(), NotFoundPage: op.GetNotFoundPage()}
 	}
-	out, err := r.NewOverrideHeaderRule(pctx, api.Stack{Name: req.GetStackName()}, rule)
+	out, err := r.NewOverrideHeaderRule(rctx.Pulumi, api.Stack{Name: req.GetStackName()}, rule)
 	if err != nil {
 		p.progress.Error("worker-route", fmt.Sprintf("rule %q failed: %v", rule.Name, err))
 		return nil, err
@@ -273,18 +236,13 @@ func (p *cruPlugin) NewOverrideHeaderRule(ctx context.Context, req *scpluginv1.N
 	return &scpluginv1.NewOverrideHeaderRuleResponse{Urn: waitForRef(out.Ref)}, nil
 }
 
-func (p *cruPlugin) ProvisionDomainForEndpoint(ctx context.Context, req *scpluginv1.ProvisionDomainForEndpointRequest) (*scpluginv1.ProvisionDomainForEndpointResponse, error) {
-	pctx, _, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
+func (p *cruPlugin) ProvisionDomainForEndpoint(ctx context.Context, req *scpluginv1.ProvisionDomainForEndpointRequest) (resp *scpluginv1.ProvisionDomainForEndpointResponse, err error) {
+	rctx, err := runtime.NewContext(ctx, req.GetHeader(), runtime.WithLocalEngineFallback(p.progress))
 	if err != nil {
 		return nil, err
 	}
-	// DO NOT close pctx — closing it cuts off in-flight RegisterResource
-	// RPCs that Pulumi's background goroutines were about to make, which
-	// drops the plugin's URN registrations and plans a destroy of every
-	// pre-existing state entry. This is the exact cascade pattern that
-	// destroyed the fleet's shared Atlas project on 2026-10-31T11:07.
-	// See Addendum U/V of
-	// forge/docs/design/2026-10-24/sc-plugin-architecture/04-no-destroy-invariant.md.
+	defer runtime.Settle(rctx, &resp, &err)
+
 	p.mu.Lock()
 	r := p.registrar
 	p.mu.Unlock()
@@ -297,7 +255,7 @@ func (p *cruPlugin) ProvisionDomainForEndpoint(ctx context.Context, req *scplugi
 		TargetHost: sdk.String(req.GetTargetHostResolved()),
 		WebSocket:  req.GetWebsocket(),
 	}
-	out, err := r.ProvisionDomainForEndpoint(pctx, api.Stack{Name: req.GetStackName()}, endpoint)
+	out, err := r.ProvisionDomainForEndpoint(rctx.Pulumi, api.Stack{Name: req.GetStackName()}, endpoint)
 	if err != nil {
 		p.progress.Error("endpoint", fmt.Sprintf("endpoint %q failed: %v", endpoint.Name, err))
 		return nil, err
@@ -307,28 +265,15 @@ func (p *cruPlugin) ProvisionDomainForEndpoint(ctx context.Context, req *scplugi
 
 // VmHosts converges a Cloud.ru Evolution VM into HostFacts the core-side
 // stack code (compose/k3s/readiness) connects to over SSH.
-//
-// Opens its own pctx against the request's monitor address and defers close()
-// — Pulumi fires RegisterResource from a goroutine and a handler that returned
-// before its outputs resolved would let pctx.Close() tear the engine
-// connection down mid-registration. The in-plugin awaits inside
-// cruInternal.VmHosts (BuildVmHosts' chain of URN waits) satisfy that
-// constraint before close() runs. Addendum H of 04-no-destroy-invariant.md.
-func (p *cruPlugin) VmHosts(ctx context.Context, req *scpluginv1.VmHostsRequest) (*scpluginv1.VmHostsResponse, error) {
+func (p *cruPlugin) VmHosts(ctx context.Context, req *scpluginv1.VmHostsRequest) (resp *scpluginv1.VmHostsResponse, err error) {
 	p.progress.Info("vm-hosts", fmt.Sprintf("provisioning cloudru-evolution-vm %q (driver=%s)", req.GetResourceName(), req.GetDriver()))
-	pctx, _, err := p.pulumiContextFromHeader(ctx, req.GetHeader())
+	rctx, err := runtime.NewContext(ctx, req.GetHeader(), runtime.WithLocalEngineFallback(p.progress))
 	if err != nil {
 		return nil, err
 	}
-	// DO NOT close pctx — closing it cuts off in-flight RegisterResource
-	// RPCs that Pulumi's background goroutines were about to make, which
-	// drops the plugin's URN registrations and plans a destroy of every
-	// pre-existing state entry. This is the exact cascade pattern that
-	// destroyed the fleet's shared Atlas project on 2026-10-31T11:07.
-	// See Addendum U/V of
-	// forge/docs/design/2026-10-24/sc-plugin-architecture/04-no-destroy-invariant.md.
+	defer runtime.Settle(rctx, &resp, &err)
 
-	resp, err := cruInternal.VmHosts(pctx, req)
+	resp, err = cruInternal.VmHosts(rctx.Pulumi, req)
 	if err != nil {
 		p.progress.Error("vm-hosts", fmt.Sprintf("vm %q failed: %v", req.GetResourceName(), err))
 		return nil, err
@@ -405,35 +350,10 @@ func intVal(v *scpluginv1.InputValue) int {
 	}
 }
 
-// decodeInputsAs lifts the plugin-bus input map into a typed Go value via a YAML
-// round-trip, which preserves the `yaml:",inline"` tags the cloudru configs lean on
-// (EvolutionAccountConfig embedded in both the registrar and the template config).
-// Unused by the registrar slice — it is here for the Container App slice, which
-// decodes a whole template config rather than four scalars.
-func decodeInputsAs[T any](inputs map[string]*scpluginv1.InputValue, out *T) error {
-	plain := make(map[string]any, len(inputs))
-	for k, v := range inputs {
-		switch x := v.GetValue().(type) {
-		case *scpluginv1.InputValue_StringValue:
-			plain[k] = x.StringValue
-		case *scpluginv1.InputValue_BoolValue:
-			plain[k] = x.BoolValue
-		case *scpluginv1.InputValue_DoubleValue:
-			plain[k] = x.DoubleValue
-		}
-	}
-	bytes, err := yaml.Marshal(plain)
-	if err != nil {
-		return err
-	}
-	return yaml.Unmarshal(bytes, out)
-}
-
-// waitForRef blocks until a Pulumi Output in a resource ref resolves. Pulumi's SDK
-// fires RegisterResource inside an async goroutine, so returning before the output
-// resolves and letting pctx.Close() run tears down the engine connection
-// mid-registration — the request vanishes silently, and the deploy is green with no
-// record written. Same function, same reason, as in sc-plugin-{cloudflare,yandex}.
+// waitForRef blocks until a Pulumi Output in a resource ref resolves. Settle
+// already drains the pctx before the RPC response is sent, but each handler
+// still needs a concrete string for the Urn field of its response — this is
+// how we pluck one out of a resource ref. Same function in every plugin.
 func waitForRef(ref any) string {
 	if ref == nil {
 		return ""
