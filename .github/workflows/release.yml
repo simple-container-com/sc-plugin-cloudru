@@ -184,3 +184,45 @@ jobs:
             --title "${VERSION}" \
             --generate-notes \
             dist/*
+
+  notify:
+    name: Notify Telegram
+    runs-on: ubuntu-latest
+    # `needs:` lists EVERY earlier job so the success/failure guards below
+    # see a complete picture — a missing job's result is absent from
+    # `needs.*.result` and the guards silently flip wrong.
+    needs: [version, test, build, release]
+    # `if: always()` is what makes this run even when an earlier `needs:`
+    # job failed, cancelled, or was skipped — without it GitHub skips the
+    # whole notify job and no "release failed" notification ever fires.
+    if: always()
+    steps:
+      - name: Notify Telegram (success)
+        # Mirrors api/.github/workflows/push.yaml's release-notify guard:
+        # success() alone is not enough — a CANCELLED or SKIPPED upstream
+        # need silently passes `!contains(..., 'failure')` while this job's
+        # own `success()` is true, which would send a "released" claim for
+        # a release that produced no artefacts. api hit exactly this on
+        # run 39253348066 before the guards expanded to all three outcomes.
+        if: ${{ success() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
+        continue-on-error: true
+        uses: simple-container-com/actions/release-notify@82457e84c1baa68cfdab423a779814949dc376a8 # main @ 2026-11-12
+        with:
+          plugin-name: sc-plugin-cloudru
+          version: ${{ needs.version.outputs.version }}
+          status: success
+          chat-id: ${{ secrets.CICD_BOT_TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.CICD_BOT_TELEGRAM_TOKEN }}
+
+      - name: Notify Telegram (failure)
+        # Mirror of the success guard — a cancelled or skipped need is also
+        # a release that did not happen, so it gets the failure notice.
+        if: ${{ failure() || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped') }}
+        continue-on-error: true
+        uses: simple-container-com/actions/release-notify@82457e84c1baa68cfdab423a779814949dc376a8 # main @ 2026-11-12
+        with:
+          plugin-name: sc-plugin-cloudru
+          version: ${{ needs.version.outputs.version }}
+          status: failure
+          chat-id: ${{ secrets.CICD_BOT_TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.CICD_BOT_TELEGRAM_TOKEN }}
