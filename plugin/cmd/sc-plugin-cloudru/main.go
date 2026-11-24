@@ -62,6 +62,15 @@ import (
 	cruCli "github.com/simple-container-com/sc-plugin-cloudru/plugin/internal/cli"
 )
 
+// version is stamped by the release workflow via
+// `go build -ldflags "-X main.version=${VERSION}"`. The default `"dev"`
+// is what a local `make build` or a test run sees. Without this
+// variable the ldflag landed on nothing (Go linker silently ignores
+// `-X` against a missing symbol) and the pre-engine load line always
+// read `vcloudru-0.0.1`. See sc-component-backup#38 for the full
+// write-up; roadmap `items/sc-plugin-version-stamp-missing-fleetwide.md`.
+var version = "dev"
+
 type cruPlugin struct {
 	scpluginv1.UnimplementedSCCloudPluginServer
 
@@ -73,7 +82,7 @@ type cruPlugin struct {
 
 func (p *cruPlugin) Schema(_ context.Context, _ *scpluginv1.SchemaRequest) (*scpluginv1.SchemaResponse, error) {
 	return &scpluginv1.SchemaResponse{
-		PluginVersion:  "cloudru-0.0.1",
+		PluginVersion:  "cloudru-" + version,
 		RegistrarTypes: []string{cruApi.RegistrarTypeCloudruDns},
 		// Intentionally NOT advertising ProviderTypes, for the same reason
 		// sc-plugin-yandex does not: SC core would create the provider in its own
